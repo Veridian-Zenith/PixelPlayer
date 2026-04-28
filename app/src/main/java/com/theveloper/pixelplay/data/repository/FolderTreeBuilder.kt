@@ -47,21 +47,62 @@ class FolderTreeBuilder @Inject constructor() {
             ?.path
             ?.path
             ?: Environment.getExternalStorageDirectory().path
-        val sdStorageRoot = storages
-            .firstOrNull { it.storageType == StorageType.SD_CARD }
-            ?.path
-            ?.path
+        val removableStorageRoots = storages
+            .filter { it.storageType != StorageType.INTERNAL }
+            .map { it.path.path }
+            .toSet()
+        val sdStorageRoot = StorageUtils.getSdCardStorage(context)?.path?.path
 
-        val selectedRootPath = when (folderSource) {
-            FolderSource.INTERNAL -> internalStorageRoot
-            FolderSource.SD_CARD -> sdStorageRoot ?: return emptyList()
+        val selectedRootPaths = when (folderSource) {
+            FolderSource.INTERNAL -> setOf(internalStorageRoot)
+            FolderSource.SD_CARD -> buildSet {
+                sdStorageRoot?.let(::add)
+                addAll(removableStorageRoots)
+                addAll(
+                    inferRemovableStorageRoots(
+                        folderSongs = filteredSongs,
+                        internalStorageRoot = internalStorageRoot,
+                        knownRemovableRoots = removableStorageRoots + listOfNotNull(sdStorageRoot)
+                    )
+                )
+            }
         }
-        
+
+        return buildFolderTreeForRoots(
+            folderSongs = filteredSongs,
+            selectedRootPaths = selectedRootPaths
+        )
+    }
+
+    internal fun buildFolderTreeForRoots(
+        folderSongs: List<FolderSongRow>,
+        selectedRootPaths: Set<String>
+    ): List<MusicFolder> {
+        val normalizedRoots = normalizeRootPaths(selectedRootPaths)
+        if (normalizedRoots.isEmpty()) return emptyList()
+
+        return normalizedRoots
+            .flatMap { rootPath ->
+                buildFolderTreeForRoot(
+                    folderSongs = folderSongs,
+                    selectedRootPath = rootPath
+                )
+            }
+            .filter { it.totalSongCount > 0 }
+            .sortedBy { it.name.lowercase() }
+    }
+
+    private fun buildFolderTreeForRoot(
+        folderSongs: List<FolderSongRow>,
+        selectedRootPath: String
+    ): List<MusicFolder> {
         val normalizedSelectedRoot = normalizePath(selectedRootPath)
 
-        // 4. Group Songs and Build Tree
-        val songsToProcess = filteredSongs.filter { song ->
-            normalizePath(song.parentDirectoryPath).startsWith(normalizedSelectedRoot)
+        val songsToProcess = folderSongs.filter { song ->
+            isPathAtOrUnder(
+                path = normalizePath(song.parentDirectoryPath),
+                root = normalizedSelectedRoot
+            )
         }
 
         if (songsToProcess.isEmpty()) return emptyList()
@@ -79,11 +120,11 @@ class FolderTreeBuilder @Inject constructor() {
             
             // Ensure hierarchy
             var currentPath = parentPath
-            while (currentPath.length > normalizedSelectedRoot.length && currentPath.startsWith(normalizedSelectedRoot)) {
+            while (currentPath.length > normalizedSelectedRoot.length && isPathAtOrUnder(currentPath, normalizedSelectedRoot)) {
                 val parentOfCurrent = getParentPath(currentPath) ?: break
                 
                 // If we went above root, stop
-                if (parentOfCurrent.length < normalizedSelectedRoot.length) break
+                if (!isPathAtOrUnder(parentOfCurrent, normalizedSelectedRoot)) break
                 
                 val parentFolder = getOrCreateTempFolder(parentOfCurrent, folderMap, getNameFromPath(parentOfCurrent))
                 val added = parentFolder.subFolderPaths.add(currentPath)
@@ -98,6 +139,63 @@ class FolderTreeBuilder @Inject constructor() {
             .mapNotNull { path -> buildImmutableFolder(path, folderMap) }
             .filter { it.totalSongCount > 0 }
             .sortedBy { it.name.lowercase() }
+    }
+
+    internal fun inferRemovableStorageRoots(
+        folderSongs: List<FolderSongRow>,
+        internalStorageRoot: String,
+        knownRemovableRoots: Set<String>
+    ): Set<String> {
+        val normalizedInternalRoot = normalizePath(internalStorageRoot)
+        val normalizedKnownRemovableRoots = normalizeRootPaths(knownRemovableRoots)
+
+        return folderSongs.mapNotNull { song ->
+            val parentPath = normalizePath(song.parentDirectoryPath)
+            if (parentPath.isBlank() || isPathAtOrUnder(parentPath, normalizedInternalRoot)) {
+                return@mapNotNull null
+            }
+
+            normalizedKnownRemovableRoots.firstOrNull { root ->
+                isPathAtOrUnder(parentPath, root)
+            } ?: inferStorageRootFromPath(parentPath)
+        }.toSet()
+    }
+
+    private fun inferStorageRootFromPath(path: String): String? {
+        val parts = path.trim('/').split('/').filter { it.isNotBlank() }
+        if (parts.isEmpty()) return null
+
+        return when {
+            parts[0] == "storage" && parts.size >= 3 && parts[1] == "emulated" ->
+                "/storage/emulated/${parts[2]}"
+            parts[0] == "storage" && parts.size >= 2 ->
+                "/storage/${parts[1]}"
+            parts.size >= 3 && parts[0] == "mnt" && parts[1] == "media_rw" ->
+                "/mnt/media_rw/${parts[2]}"
+            parts.size >= 2 && parts[0] == "mnt" ->
+                "/mnt/${parts[1]}"
+            parts[0].startsWith("sdcard", ignoreCase = true) ->
+                "/${parts[0]}"
+            else -> null
+        }
+    }
+
+    private fun normalizeRootPaths(rootPaths: Set<String>): List<String> {
+        val normalizedRoots = rootPaths
+            .map(::normalizePath)
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        return normalizedRoots.filterNot { candidate ->
+            normalizedRoots.any { other ->
+                other != candidate && isPathAtOrUnder(path = other, root = candidate)
+            }
+        }
+    }
+
+    private fun isPathAtOrUnder(path: String, root: String): Boolean {
+        if (path == root) return true
+        return path.startsWith("$root/")
     }
 
     private fun getOrCreateTempFolder(path: String, map: MutableMap<String, TempFolder>, name: String): TempFolder {

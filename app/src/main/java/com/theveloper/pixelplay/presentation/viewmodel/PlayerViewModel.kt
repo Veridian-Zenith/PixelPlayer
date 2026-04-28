@@ -129,7 +129,7 @@ import coil.memory.MemoryCache
 import dagger.Lazy
 
 private const val CAST_LOG_TAG = "PlayerCastTransfer"
-private const val ENABLE_FOLDERS_SOURCE_SWITCHING = false
+private const val ENABLE_FOLDERS_SOURCE_SWITCHING = true
 private const val MAX_ALBUM_BATCH_SELECTION = 6
 private const val SONG_ID_QUERY_CHUNK_SIZE = 900
 private const val HOME_MIX_PREVIEW_LIMIT = 48
@@ -1575,8 +1575,7 @@ class PlayerViewModel @Inject constructor(
             ?.path
             ?.path
             ?: android.os.Environment.getExternalStorageDirectory().path
-        val sdPath = storages
-            .firstOrNull { it.storageType == StorageType.SD_CARD }
+        val sdPath = StorageUtils.getSdCardStorage(context)
             ?.path
             ?.path
 

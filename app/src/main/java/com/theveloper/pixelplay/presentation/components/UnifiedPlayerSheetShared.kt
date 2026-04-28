@@ -56,7 +56,7 @@ val MiniPlayerBottomSpacer = 8.dp
 @Composable
 fun getNavigationBarHeight(): Dp {
     val insets = WindowInsets.safeDrawing.asPaddingValues()
-    return insets.calculateBottomPadding()
+    return sanitizeNavigationBarBottomInset(insets.calculateBottomPadding())
 }
 
 @Composable

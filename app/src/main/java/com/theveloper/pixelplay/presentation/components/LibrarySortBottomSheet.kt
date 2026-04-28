@@ -52,6 +52,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.Dp
 import com.theveloper.pixelplay.R
 import com.theveloper.pixelplay.data.model.SortDirection
 import com.theveloper.pixelplay.data.model.SortOption
@@ -103,7 +104,7 @@ fun LibrarySortBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 16.dp)
+                .padding(horizontal = 24.dp, vertical = 0.dp)
                 .selectableGroup(),
             verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
@@ -112,7 +113,7 @@ fun LibrarySortBottomSheet(
                 style = MaterialTheme.typography.headlineMedium,
                 fontFamily = GoogleSansRounded,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(start = 2.dp, top = 8.dp, bottom = 16.dp)
+                modifier = Modifier.padding(start = 2.dp, top = 0.dp, bottom = 16.dp)
             )
 
             // Cast to nullable list to handle potential runtime nulls, then filter
@@ -399,7 +400,7 @@ internal fun LibrarySheetToggleCard(
     label: String,
     checked: Boolean,
     boxBackgroundColor: Color,
-    boxCornerRadius: androidx.compose.ui.unit.Dp,
+    boxCornerRadius: Dp,
     onCheckedChange: (Boolean) -> Unit
 ) {
     Box(
@@ -439,8 +440,9 @@ internal fun LibrarySheetToggleCard(
                 checked = checked,
                 onCheckedChange = onCheckedChange,
                 colors = SwitchDefaults.colors(
-                    checkedThumbColor = MaterialTheme.colorScheme.tertiary,
-                    checkedTrackColor = MaterialTheme.colorScheme.tertiaryContainer,
+                    checkedThumbColor = MaterialTheme.colorScheme.onTertiary,
+                    checkedTrackColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                    checkedIconColor = MaterialTheme.colorScheme.onTertiaryContainer,
                     uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
                 ),
@@ -449,7 +451,7 @@ internal fun LibrarySheetToggleCard(
                         Icon(
                             imageVector = Icons.Rounded.Check,
                             contentDescription = stringResource(R.string.presentation_batch_g_cd_switch_on),
-                            tint = MaterialTheme.colorScheme.tertiaryContainer,
+                            //tint = MaterialTheme.colorScheme.onTertiaryContainer,
                             modifier = Modifier.size(SwitchDefaults.IconSize),
                         )
                     }

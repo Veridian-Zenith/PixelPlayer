@@ -249,11 +249,14 @@ import kotlin.math.abs
 val ListExtraBottomGap = 30.dp
 val PlayerSheetCollapsedCornerRadius = 32.dp
 private const val MAX_ALBUM_MULTI_SELECTION = 6
-private const val ENABLE_FOLDERS_SOURCE_TOGGLE = false
+private const val ENABLE_FOLDERS_SOURCE_TOGGLE = true
 private const val ENABLE_FOLDERS_STORAGE_FILTER = false
 private const val FOLDER_NAVIGATION_ROOT_KEY = "__folder_root__"
 private const val FOLDER_NAVIGATION_FORWARD = 1
 private const val FOLDER_NAVIGATION_BACKWARD = -1
+private const val PULL_REFRESH_MIN_VISIBLE_MS = 900L
+private const val PULL_REFRESH_MAX_VISIBLE_MS = 1_500L
+private const val INLINE_SYNC_MIN_VISIBLE_MS = 600L
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -440,13 +443,12 @@ fun LibraryScreen(
     val scope = rememberCoroutineScope() // Mantener si se usa para acciones de UI
     val syncManager = playerViewModel.syncManager
     var isRefreshing by remember { mutableStateOf(false) }
-    // The pull-to-refresh spinner reflects ONLY the early "library changes" phases
-    // (MediaStore deletion check, fetch, processing). Background maintenance —
-    // LRC scan, art-cache cleanup, cloud-source sync — is reported separately by
-    // the slim linear indicator under LibraryActionRow so the gesture feels snappy.
+    // The pull-to-refresh spinner is reserved for user gestures. Automatic sync
+    // and long-running refresh work move through the slim linear indicator under
+    // LibraryActionRow so the list stays put.
     val isFetchingChanges by syncManager.isFetchingChanges
         .collectAsStateWithLifecycle(initialValue = false)
-    val isPerformingMaintenance by syncManager.isPerformingMaintenance
+    val isSyncing by syncManager.isSyncing
         .collectAsStateWithLifecycle(initialValue = false)
     // NOTE: syncProgress is NOT collected here. It is collected inside LibrarySyncOverlay
     // to avoid triggering recomposition of the entire LibraryScreen on every progress tick.
@@ -599,62 +601,80 @@ fun LibraryScreen(
             showSongInfoBottomSheet = true
         }
     }
-    // Pull-to-refresh uses incremental sync for speed.
-    // The spinner only stays visible while the worker is in a "changes" phase, with a
-    // short tactile minimum so a no-op refresh still confirms the gesture.
+    // Pull-to-refresh uses incremental sync for speed. The spinner gives manual
+    // refreshes a short tactile confirmation, then longer work hands off to the
+    // inline sync indicator.
     var isMinDelayActive by remember { mutableStateOf(false) }
+    var refreshGeneration by remember { mutableStateOf(0) }
 
-    val onRefresh: () -> Unit = remember {
+    val onRefresh: () -> Unit = remember(scope, syncManager) {
         {
+            val currentRefreshGeneration = refreshGeneration + 1
+            refreshGeneration = currentRefreshGeneration
             isMinDelayActive = true
             isRefreshing = true
             syncManager.incrementalSync()
             scope.launch {
-                kotlinx.coroutines.delay(900)
+                kotlinx.coroutines.delay(PULL_REFRESH_MIN_VISIBLE_MS)
+                if (currentRefreshGeneration != refreshGeneration) return@launch
                 isMinDelayActive = false
                 // If the changes phase already finished while the tactile minimum was
                 // still active, hide the spinner now.
                 val stillFetching = syncManager.isFetchingChanges.first()
                 if (!stillFetching) {
                     isRefreshing = false
+                    return@launch
                 }
+
+                val remainingVisibleMs =
+                    (PULL_REFRESH_MAX_VISIBLE_MS - PULL_REFRESH_MIN_VISIBLE_MS)
+                        .coerceAtLeast(0L)
+                if (remainingVisibleMs > 0L) {
+                    kotlinx.coroutines.delay(remainingVisibleMs)
+                }
+                if (currentRefreshGeneration != refreshGeneration) return@launch
+                // Long-running refresh work continues through the inline indicator.
+                isRefreshing = false
             }
         }
     }
 
     LaunchedEffect(isFetchingChanges) {
-        if (isFetchingChanges) {
-            isRefreshing = true
-        } else if (!isMinDelayActive) {
+        if (!isFetchingChanges && !isMinDelayActive) {
             isRefreshing = false
         }
     }
 
-    // Minimum-visible gate for the maintenance indicator. Some maintenance phases
-    // (e.g. cache cleanup with an empty cache, or cloud sync that early-exits) finish
-    // in tens of milliseconds, which would otherwise produce a single-frame flicker
-    // of the linear bar. We hold it visible for at least 600ms — less than the
-    // pull-to-refresh tactile minimum (900ms) since this indicator is more passive.
-    val rawMaintenanceVisible = isPerformingMaintenance && !isFetchingChanges
-    var maintenanceVisible by remember { mutableStateOf(false) }
-    var maintenanceShownAt by remember { mutableStateOf<Long?>(null) }
-    LaunchedEffect(rawMaintenanceVisible) {
-        if (rawMaintenanceVisible) {
-            if (!maintenanceVisible) {
-                maintenanceShownAt = System.currentTimeMillis()
-                maintenanceVisible = true
+    // Minimum-visible gate for the inline sync indicator. It covers automatic
+    // startup syncs and manual refreshes once the pull spinner has handed off.
+    // Fast no-op phases finish in tens of milliseconds, so the small linear bar is
+    // held briefly to avoid single-frame flicker.
+    var inlineSyncVisible by remember { mutableStateOf(false) }
+    var inlineSyncShownAt by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(isSyncing, isRefreshing) {
+        if (isSyncing && !isRefreshing) {
+            if (!inlineSyncVisible) {
+                inlineSyncShownAt = System.currentTimeMillis()
+                inlineSyncVisible = true
             }
-        } else if (maintenanceVisible) {
-            val shownAt = maintenanceShownAt
-            val elapsed = if (shownAt != null) System.currentTimeMillis() - shownAt else 600L
-            val remaining = 600L - elapsed
+        } else if (isRefreshing) {
+            inlineSyncVisible = false
+            inlineSyncShownAt = null
+        } else if (inlineSyncVisible) {
+            val shownAt = inlineSyncShownAt
+            val elapsed = if (shownAt != null) {
+                System.currentTimeMillis() - shownAt
+            } else {
+                INLINE_SYNC_MIN_VISIBLE_MS
+            }
+            val remaining = INLINE_SYNC_MIN_VISIBLE_MS - elapsed
             if (remaining > 0) {
                 kotlinx.coroutines.delay(remaining)
             }
-            // If maintenance flipped back to true during the delay this LaunchedEffect
+            // If sync flipped back to visible during the delay this LaunchedEffect
             // is cancelled and re-runs, so reaching this line means we should hide.
-            maintenanceVisible = false
-            maintenanceShownAt = null
+            inlineSyncVisible = false
+            inlineSyncShownAt = null
         }
     }
 
@@ -1265,14 +1285,11 @@ fun LibraryScreen(
                             }
                         }
 
-                        // Slim background-maintenance indicator. Reports LRC scanning,
-                        // album-art cache cleanup, and cloud-source syncing. AnimatedVisibility
-                        // collapses the row to zero height when nothing is running so the
-                        // tab content does not shift between sync cycles. Visibility is
-                        // gated on a 600ms minimum (see LaunchedEffect above) to avoid
-                        // flicker when a maintenance phase completes in a few frames.
-                        LibraryMaintenanceIndicator(
-                            visible = maintenanceVisible,
+                        // Slim inline sync indicator. Automatic startup syncs use this
+                        // instead of pulling the list down, and manual refreshes hand off
+                        // to it when the worker takes longer than the pull gesture window.
+                        LibraryInlineSyncIndicator(
+                            visible = inlineSyncVisible && !isLibraryContentEmpty,
                             syncManager = syncManager
                         )
 
@@ -1693,7 +1710,7 @@ fun LibraryScreen(
                 ) {
                     // The full-screen overlay is reserved for first-launch / empty library
                     // states. Once the user has content, in-place indicators (pull-to-refresh
-                    // spinner + LibraryMaintenanceIndicator) handle sync feedback so the
+                    // spinner + LibraryInlineSyncIndicator) handle sync feedback so the
                     // list stays visible.
                     LibrarySyncOverlay(syncManager = syncManager)
                 }
@@ -2142,19 +2159,17 @@ private fun CompactLibraryPagerIndicator(
 }
 
 /**
- * Slim, non-intrusive indicator for sync work that runs AFTER the user-relevant
- * "library changes" phase has finished — LRC scanning, album-art cache cleanup, and
- * cloud-source synchronization. Sits just below [LibraryActionRow] and collapses to
- * zero height when not active so it never reflows the tab content.
+ * Slim, non-intrusive indicator for sync work that should not keep the list pulled
+ * down: automatic startup syncs, background maintenance, and manual refreshes after
+ * the short pull-to-refresh confirmation window. It sits just below
+ * [LibraryActionRow] and collapses to zero height when not active.
  *
- * Distinct from the pull-to-refresh spinner (which signals "your additions/deletions
- * are landing") and from [LibrarySyncOverlay] (full-screen, only used for the initial
- * empty-library load). The two indicators are designed not to fire at the same time:
- * the worker advances sequentially through change phases first, then maintenance
- * phases, and the parent screen also gates this one on `!isFetchingChanges`.
+ * Distinct from [LibrarySyncOverlay], which is reserved for initial empty-library
+ * loads. The parent screen also gates this indicator off while the pull spinner is
+ * visible, so the two feedback channels do not compete.
  */
 @Composable
-private fun LibraryMaintenanceIndicator(
+private fun LibraryInlineSyncIndicator(
     visible: Boolean,
     syncManager: com.theveloper.pixelplay.data.worker.SyncManager
 ) {
@@ -2175,6 +2190,11 @@ private fun LibraryMaintenanceIndicator(
             .collectAsStateWithLifecycle(initialValue = SyncProgress())
 
         val phaseLabel = when (syncProgress.phase) {
+            SyncProgress.SyncPhase.FETCHING_MEDIASTORE ->
+                stringResource(R.string.sync_scanning)
+            SyncProgress.SyncPhase.PROCESSING_FILES,
+            SyncProgress.SyncPhase.SAVING_TO_DATABASE ->
+                stringResource(R.string.sync_processing)
             SyncProgress.SyncPhase.SCANNING_LRC ->
                 stringResource(R.string.library_background_sync_lyrics)
             SyncProgress.SyncPhase.CLEANING_CACHE ->
@@ -2182,7 +2202,7 @@ private fun LibraryMaintenanceIndicator(
             SyncProgress.SyncPhase.SYNCING_CLOUD ->
                 stringResource(R.string.library_background_sync_cloud)
             else ->
-                stringResource(R.string.library_background_sync)
+                stringResource(R.string.sync_in_progress)
         }
 
         Column(
@@ -2974,13 +2994,7 @@ fun LibraryFoldersTab(
                                             if (isSelectionMode) {
                                                 onSongSelectionToggle(song)
                                             } else {
-                                                val songIndex = songsToShow.indexOf(song)
-                                                if (songIndex != -1) {
-                                                    val songsToPlay =
-                                                        songsToShow.subList(songIndex, songsToShow.size)
-                                                            .toList()
-                                                    onPlaySong(song, songsToPlay)
-                                                }
+                                                onPlaySong(song, songsToShow)
                                             }
                                         }
                                     )

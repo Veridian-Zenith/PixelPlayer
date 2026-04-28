@@ -75,7 +75,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
@@ -116,8 +115,10 @@ import com.theveloper.pixelplay.presentation.components.PlayStoreAnnouncementDef
 import com.theveloper.pixelplay.presentation.components.PlayStoreAnnouncementDialog
 import com.theveloper.pixelplay.presentation.components.PlayStoreAnnouncementUiModel
 import com.theveloper.pixelplay.presentation.components.UnifiedPlayerSheetV2
+import com.theveloper.pixelplay.presentation.components.calculatePlayerSheetCollapsedTargetY
 import com.theveloper.pixelplay.presentation.components.resolveNavBarOccupiedHeight
 import com.theveloper.pixelplay.presentation.components.resolveNavBarSurfaceHeight
+import com.theveloper.pixelplay.presentation.components.sanitizeNavigationBarBottomInset
 import com.theveloper.pixelplay.presentation.navigation.AppNavigation
 import com.theveloper.pixelplay.presentation.navigation.Screen
 import com.theveloper.pixelplay.presentation.screens.SetupScreen
@@ -629,7 +630,9 @@ class MainActivity : ComponentActivity() {
             if (appHapticsConfig.enabled) platformHapticFeedback else NoOpHapticFeedback
         }
 
-        val systemNavBarInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        val systemNavBarInset = sanitizeNavigationBarBottomInset(
+            WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        )
 
         LaunchedEffect(hapticsEnabled, rootView) {
             rootView.isHapticFeedbackEnabled = hapticsEnabled
@@ -869,9 +872,10 @@ class MainActivity : ComponentActivity() {
                 ) { innerPadding ->
                     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                         val density = LocalDensity.current
-                        val configuration = LocalWindowInfo.current
-                        val screenHeightPx = remember(configuration) { with(density) { configuration.containerSize.height } }
                         val containerHeight = this.maxHeight
+                        val screenHeightPx = remember(containerHeight, density) {
+                            with(density) { containerHeight.toPx() }
+                        }
 
                         val showPlayerContentInitially by remember {
                             playerViewModel.stablePlayerState
@@ -889,7 +893,13 @@ class MainActivity : ComponentActivity() {
                         val bottomMargin = miniPlayerBottomMargin
 
                         val spacerPx = with(density) { MiniPlayerBottomSpacer.toPx() }
-                        val sheetCollapsedTargetY = screenHeightPx - totalSheetHeightWhenContentCollapsedPx - with(density){ bottomMargin.toPx() } - spacerPx
+                        val bottomMarginPx = with(density) { bottomMargin.toPx() }
+                        val sheetCollapsedTargetY = calculatePlayerSheetCollapsedTargetY(
+                            containerHeightPx = screenHeightPx,
+                            collapsedContentHeightPx = totalSheetHeightWhenContentCollapsedPx,
+                            bottomMarginPx = bottomMarginPx,
+                            bottomSpacerPx = spacerPx
+                        )
 
                         AppNavigation(
                             playerViewModel = playerViewModel,

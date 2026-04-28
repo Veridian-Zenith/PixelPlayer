@@ -6,6 +6,7 @@ import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
@@ -15,6 +16,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.graphics.drawable.toBitmap
 import androidx.glance.appwidget.GlanceAppWidgetManager
 import androidx.glance.appwidget.state.updateAppWidgetState
@@ -61,7 +63,6 @@ import com.theveloper.pixelplay.ui.glancewidget.PlayerInfoStateDefinition
 import com.theveloper.pixelplay.utils.AlbumArtUtils
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -69,6 +70,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 import com.theveloper.pixelplay.data.equalizer.EqualizerManager
@@ -170,6 +172,7 @@ class MusicService : MediaLibraryService() {
     private var observedCastSession: CastSession? = null
     private var playbackSnapshotPersistJob: Job? = null
     private var isRestoringPlaybackSnapshot = false
+    private var isPlaybackUnloadInProgress = false
     private val audioManager by lazy {
         getSystemService(Context.AUDIO_SERVICE) as AudioManager
     }
@@ -300,15 +303,17 @@ class MusicService : MediaLibraryService() {
             }
         }
 
-        super.onCreate()
-
-        // A MEDIA_BUTTON broadcast starts the foreground-service timeout before
-        // MusicService reaches onStartCommand(). Promote as early as possible so
-        // cold-start initialization cannot consume the whole timeout window.
+        // A MEDIA_BUTTON broadcast starts the 5-second foreground-service timeout
+        // BEFORE MusicService is created. Promote to foreground before super.onCreate()
+        // — Hilt injection plus MediaLibraryService.onCreate() can otherwise consume
+        // most of the budget on a slow cold-start. The temporary notification only uses
+        // Context/resources, no injected fields, so it is safe before super.onCreate().
         temporaryForegroundStartedInOnCreate = consumePendingMediaButtonForegroundStart()
         if (temporaryForegroundStartedInOnCreate) {
             startTemporaryForegroundForCommand()
         }
+
+        super.onCreate()
         
         // Ensure engine is ready (re-initialize if service was restarted)
         engine.initialize()
@@ -882,8 +887,20 @@ class MusicService : MediaLibraryService() {
             .setSilent(true)
             .setOngoing(true)
             .build()
+        // Pass mediaPlayback explicitly. On API 34+ a missing/mismatched type can throw
+        // MissingForegroundServiceTypeException; ServiceCompat picks the right overload
+        // per API level and matches the manifest-declared foregroundServiceType.
         try {
-            startForeground(NOTIFICATION_ID, notification)
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                notification,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                } else {
+                    0
+                }
+            )
         } catch (e: Exception) {
             Timber.tag(TAG).w(e, "Failed to promote service to foreground for external command")
         }
@@ -1526,6 +1543,9 @@ class MusicService : MediaLibraryService() {
     }
 
     private fun schedulePlaybackSnapshotPersist(immediate: Boolean = false) {
+        if (isPlaybackUnloadInProgress) {
+            return
+        }
         playbackSnapshotPersistJob?.cancel()
         playbackSnapshotPersistJob = serviceScope.launch {
             if (!immediate) {
@@ -1535,9 +1555,9 @@ class MusicService : MediaLibraryService() {
         }
     }
 
-    private suspend fun persistPlaybackSnapshot() {
+    private suspend fun persistPlaybackSnapshot(playWhenReadyOverride: Boolean? = null) {
         if (isRestoringPlaybackSnapshot) return
-        val snapshot = capturePlaybackSnapshot()
+        val snapshot = capturePlaybackSnapshot(playWhenReadyOverride)
         runCatching {
             userPreferencesRepository.setPlaybackQueueSnapshot(snapshot)
         }.onFailure { e ->
@@ -1545,74 +1565,80 @@ class MusicService : MediaLibraryService() {
         }
     }
 
-    private suspend fun capturePlaybackSnapshot(): PlaybackQueueSnapshot? =
+    private suspend fun capturePlaybackSnapshot(playWhenReadyOverride: Boolean? = null): PlaybackQueueSnapshot? =
         withContext(Dispatchers.Main.immediate) {
-            val player = engine.masterPlayer
-            val mediaItemCount = player.mediaItemCount
-            if (mediaItemCount <= 0) {
-                return@withContext null
+            capturePlaybackSnapshotFromPlayer(playWhenReadyOverride)
+        }
+
+    private fun capturePlaybackSnapshotFromPlayer(
+        playWhenReadyOverride: Boolean? = null
+    ): PlaybackQueueSnapshot? {
+        val player = engine.masterPlayer
+        val mediaItemCount = player.mediaItemCount
+        if (mediaItemCount <= 0) {
+            return null
+        }
+
+        val snapshotItems = ArrayList<PlaybackQueueItemSnapshot>(mediaItemCount)
+        for (index in 0 until mediaItemCount) {
+            val mediaItem = player.getMediaItemAt(index)
+            val metadata = mediaItem.mediaMetadata
+            val uri = mediaItem.localConfiguration?.uri?.toString()
+                ?: metadata.extras?.getString(MediaItemBuilder.EXTERNAL_EXTRA_CONTENT_URI)
+
+            if (mediaItem.mediaId.isBlank() || uri.isNullOrBlank()) {
+                continue
             }
 
-            val snapshotItems = ArrayList<PlaybackQueueItemSnapshot>(mediaItemCount)
-            for (index in 0 until mediaItemCount) {
-                val mediaItem = player.getMediaItemAt(index)
-                val metadata = mediaItem.mediaMetadata
-                val uri = mediaItem.localConfiguration?.uri?.toString()
-                    ?: metadata.extras?.getString(MediaItemBuilder.EXTERNAL_EXTRA_CONTENT_URI)
+            val durationMs = metadata.extras
+                ?.getLong(MediaItemBuilder.EXTERNAL_EXTRA_DURATION)
+                ?.takeIf { it > 0L }
 
-                if (mediaItem.mediaId.isBlank() || uri.isNullOrBlank()) {
-                    continue
-                }
-
-                val durationMs = metadata.extras
-                    ?.getLong(MediaItemBuilder.EXTERNAL_EXTRA_DURATION)
-                    ?.takeIf { it > 0L }
-
-                snapshotItems.add(
-                    PlaybackQueueItemSnapshot(
-                        mediaId = mediaItem.mediaId,
-                        uri = uri,
-                        title = metadata.title?.toString(),
-                        artist = metadata.artist?.toString(),
-                        albumTitle = metadata.albumTitle?.toString(),
-                        artworkUri = resolveStoredArtworkUriString(metadata),
-                        durationMs = durationMs,
-                    )
+            snapshotItems.add(
+                PlaybackQueueItemSnapshot(
+                    mediaId = mediaItem.mediaId,
+                    uri = uri,
+                    title = metadata.title?.toString(),
+                    artist = metadata.artist?.toString(),
+                    albumTitle = metadata.albumTitle?.toString(),
+                    artworkUri = resolveStoredArtworkUriString(metadata),
+                    durationMs = durationMs,
                 )
-            }
-
-            if (snapshotItems.isEmpty()) {
-                return@withContext null
-            }
-
-            val currentMediaId = player.currentMediaItem?.mediaId
-            val indexFromMediaId = currentMediaId
-                ?.let { id -> snapshotItems.indexOfFirst { it.mediaId == id } }
-                ?.takeIf { it >= 0 }
-
-            val safeCurrentIndex = when {
-                indexFromMediaId != null -> indexFromMediaId
-                player.currentMediaItemIndex in snapshotItems.indices -> player.currentMediaItemIndex
-                else -> 0
-            }
-
-            val safeRepeatMode = when (player.repeatMode) {
-                Player.REPEAT_MODE_OFF,
-                Player.REPEAT_MODE_ONE,
-                Player.REPEAT_MODE_ALL -> player.repeatMode
-                else -> Player.REPEAT_MODE_OFF
-            }
-
-            PlaybackQueueSnapshot(
-                items = snapshotItems,
-                currentMediaId = currentMediaId,
-                currentIndex = safeCurrentIndex,
-                currentPositionMs = player.currentPosition.coerceAtLeast(0L),
-                playWhenReady = player.playWhenReady,
-                repeatMode = safeRepeatMode,
-                shuffleEnabled = isManualShuffleEnabled,
             )
         }
+
+        if (snapshotItems.isEmpty()) {
+            return null
+        }
+
+        val currentMediaId = player.currentMediaItem?.mediaId
+        val indexFromMediaId = currentMediaId
+            ?.let { id -> snapshotItems.indexOfFirst { it.mediaId == id } }
+            ?.takeIf { it >= 0 }
+
+        val safeCurrentIndex = when {
+            indexFromMediaId != null -> indexFromMediaId
+            player.currentMediaItemIndex in snapshotItems.indices -> player.currentMediaItemIndex
+            else -> 0
+        }
+
+        val safeRepeatMode = when (player.repeatMode) {
+            Player.REPEAT_MODE_OFF,
+            Player.REPEAT_MODE_ONE,
+            Player.REPEAT_MODE_ALL -> player.repeatMode
+            else -> Player.REPEAT_MODE_OFF
+        }
+
+        return PlaybackQueueSnapshot(
+            items = snapshotItems,
+            currentMediaId = currentMediaId,
+            currentIndex = safeCurrentIndex,
+            currentPositionMs = player.currentPosition.coerceAtLeast(0L),
+            playWhenReady = playWhenReadyOverride ?: player.playWhenReady,
+            repeatMode = safeRepeatMode,
+            shuffleEnabled = isManualShuffleEnabled,
+        )
+    }
 
     private suspend fun restorePlaybackQueueSnapshotIfNeeded() {
         val alreadyHasQueue = withContext(Dispatchers.Main.immediate) {
@@ -1627,6 +1653,11 @@ class MusicService : MediaLibraryService() {
         if (snapshot.items.isEmpty()) {
             return
         }
+
+        val allowBackgroundPlayback = runCatching {
+            userPreferencesRepository.keepPlayingInBackgroundFlow.first()
+        }.getOrDefault(keepPlayingInBackground)
+        val shouldRestorePlaying = snapshot.playWhenReady && allowBackgroundPlayback
 
         val restoredItems = snapshot.items.mapNotNull(::buildMediaItemFromSnapshot)
         if (restoredItems.isEmpty()) {
@@ -1677,8 +1708,10 @@ class MusicService : MediaLibraryService() {
                 player.repeatMode = safeRepeatMode
                 player.shuffleModeEnabled = false
                 isManualShuffleEnabled = snapshot.shuffleEnabled
-                if (snapshot.playWhenReady) {
+                if (shouldRestorePlaying) {
                     player.playWhenReady = true
+                } else {
+                    player.playWhenReady = false
                 }
             } finally {
                 isRestoringPlaybackSnapshot = false
@@ -1689,7 +1722,7 @@ class MusicService : MediaLibraryService() {
             "Restored playback snapshot: items=%d index=%d playWhenReady=%s",
             restoredItems.size,
             snapshot.currentIndex,
-            snapshot.playWhenReady
+            shouldRestorePlaying
         )
         schedulePlaybackSnapshotPersist(immediate = true)
     }
@@ -2572,17 +2605,20 @@ class MusicService : MediaLibraryService() {
 
     private fun closeNotificationPlayer() {
         stopPlaybackAndUnload(
-            reason = "notification_close_button"
+            reason = "notification_close_button",
+            preservePlaybackSnapshot = false
         )
     }
 
     private fun stopPlaybackAndUnload(
         reason: String,
+        preservePlaybackSnapshot: Boolean = true,
     ) {
         Timber.tag(TAG).d(
             "Stopping playback and unloading service. reason=%s",
             reason
         )
+        isPlaybackUnloadInProgress = true
         followUpMediaSessionUiRefreshJob?.cancel()
         mediaSessionButtonRefreshJob?.cancel()
         followUpWidgetUpdateJob?.cancel()
@@ -2596,7 +2632,11 @@ class MusicService : MediaLibraryService() {
         cancelDurationSleepTimerInternal()
         endOfTrackTimerSongId = null
 
-        persistPlaybackSnapshotImmediately()
+        if (preservePlaybackSnapshot) {
+            persistPlaybackSnapshotBlocking(playWhenReadyOverride = false)
+        } else {
+            clearPlaybackSnapshotBlocking()
+        }
 
         player.playWhenReady = false
         player.stop()
@@ -2608,10 +2648,22 @@ class MusicService : MediaLibraryService() {
         stopSelf()
     }
 
-    private fun persistPlaybackSnapshotImmediately() {
-        playbackSnapshotPersistJob?.cancel()
-        playbackSnapshotPersistJob = serviceScope.launch(start = CoroutineStart.UNDISPATCHED) {
-            persistPlaybackSnapshot()
+    private fun persistPlaybackSnapshotBlocking(playWhenReadyOverride: Boolean? = null) {
+        val snapshot = capturePlaybackSnapshotFromPlayer(playWhenReadyOverride)
+        writePlaybackSnapshotBlocking(snapshot)
+    }
+
+    private fun clearPlaybackSnapshotBlocking() {
+        writePlaybackSnapshotBlocking(null)
+    }
+
+    private fun writePlaybackSnapshotBlocking(snapshot: PlaybackQueueSnapshot?) {
+        runCatching {
+            runBlocking(Dispatchers.IO) {
+                userPreferencesRepository.setPlaybackQueueSnapshot(snapshot)
+            }
+        }.onFailure { e ->
+            Timber.tag(TAG).w(e, "Failed to persist playback snapshot during unload")
         }
     }
 

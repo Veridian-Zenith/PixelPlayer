@@ -111,23 +111,17 @@ object StorageUtils {
         val description = volume.getDescription(null)?.lowercase() ?: ""
         
         return when {
-            description.contains("sd") -> StorageType.SD_CARD
             description.contains("usb") -> StorageType.USB
             description.contains("otg") -> StorageType.USB
-            // Default removable storage as SD card (most common case)
-            else -> {
-                // Additional heuristic: check volume UUID pattern
-                // SD cards often have specific UUID formats
-                val uuid = volume.uuid
-                if (uuid != null && uuid.length <= 9) {
-                    // Short UUID typically indicates SD card (e.g., "1234-5678")
-                    StorageType.SD_CARD
-                } else {
-                    // Longer or null UUID might indicate USB
-                    StorageType.USB
-                }
-            }
+            description.contains("sd") -> StorageType.SD_CARD
+            else -> StorageType.SD_CARD
         }
+    }
+
+    fun getSdCardStorage(context: Context): StorageInfo? {
+        val storages = getAvailableStorages(context)
+        return storages.firstOrNull { it.storageType == StorageType.SD_CARD }
+            ?: storages.firstOrNull { it.isRemovable && it.storageType != StorageType.INTERNAL }
     }
 
     /**
