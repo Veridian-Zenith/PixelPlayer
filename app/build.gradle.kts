@@ -82,8 +82,15 @@ android {
     }
     compileOptions {
         isCoreLibraryDesugaringEnabled = true
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+    java {
+        toolchain {
+            languageVersion.set(JavaLanguageVersion.of(21))
+            // Add this line to force Temurin (Adoptium)
+            vendor.set(JvmVendorSpec.ADOPTIUM)
+        }
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "2.1.0"
@@ -94,7 +101,7 @@ android {
         buildConfig = true
     }
     kotlinOptions {
-        jvmTarget = "11"
+        jvmTarget = "21"
         if (enableComposeCompilerReports) {
             freeCompilerArgs += listOf(
                 "-P",
