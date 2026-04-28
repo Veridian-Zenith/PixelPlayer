@@ -31,7 +31,7 @@ jobs:
         cache: 'gradle'
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
+      uses: github/codeql-action/init@v4
       with:
         languages: 'java-kotlin'
         build-mode: manual
@@ -41,7 +41,7 @@ jobs:
       run: |
         chmod +x gradlew
         # Using --no-daemon is critical for CodeQL to trace the build accurately
-        ./gradlew assembleDebug --no-daemon
+        ./gradlew assembleDebug -Porg.gradle.java.installations.auto-download=false --no-daemon
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4
