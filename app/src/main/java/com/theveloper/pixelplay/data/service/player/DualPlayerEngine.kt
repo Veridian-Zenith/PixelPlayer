@@ -88,7 +88,7 @@ class DualPlayerEngine @Inject constructor(
 
     private val onPlayerSwappedListeners = mutableListOf<(Player) -> Unit>()
     private val onTransitionFinishedListeners = mutableListOf<() -> Unit>()
-    
+
     // Active Audio Session ID Flow
     private val _activeAudioSessionId = kotlinx.coroutines.flow.MutableStateFlow(0)
     val activeAudioSessionId: kotlinx.coroutines.flow.StateFlow<Int> = _activeAudioSessionId.asStateFlow()
@@ -298,7 +298,7 @@ class DualPlayerEngine @Inject constructor(
 
         // Initialize active session ID
         _activeAudioSessionId.value = playerA.audioSessionId
-        
+
         isReleased = false
     }
 
@@ -470,6 +470,12 @@ class DualPlayerEngine @Inject constructor(
                 requiresTunnelingDecoder
             )
 
+            // Log available decoders for debugging - this helps identify hardware vs software on Galaxy A54
+            Timber.tag("MediaCodecSelector").d("MIME: %s, Available decoders (%d):", mimeType, decoderInfos.size)
+            decoderInfos.forEachIndexed { index, info ->
+                Timber.tag("MediaCodecSelector").d("  [%d] %s (hardwareAccelerated=%s)", index, info.name, info.hardwareAccelerated)
+            }
+
             // Some devices advertise ALAC decoders that stall on high-bitrate M4A files.
             // Prefer stable software codecs when available, otherwise let the FFmpeg
             // extension renderer handle ALAC by hiding the platform candidates.
@@ -477,7 +483,41 @@ class DualPlayerEngine @Inject constructor(
                 val softwareDecoders = decoderInfos.filterNot { it.hardwareAccelerated }
                 softwareDecoders.ifEmpty { emptyList() }
             } else {
-                decoderInfos
+                // For all other codecs (especially FLAC), prefer hardware decoders.
+                // On Samsung Exynos devices (like Galaxy A54), hardware decoders typically have "omx.exynos" prefix.
+                // Be more aggressive: any decoder with a vendor-specific prefix is likely hardware.
+                val sortedDecoders = decoderInfos.sortedBy { info ->
+                    val name = info.name.lowercase()
+                    // Known software decoder patterns (these are always software)
+                    val isKnownSoftware = name.contains("c2.android") ||
+                            name.contains("omx.google") ||
+                            name.contains("omx.android") ||
+                            name.contains(".sw.") ||  // some software decoders have "sw" in name
+                            name.endsWith(".sw") ||
+                            (name.contains("android") && name.contains("software"))
+
+                    // Known hardware decoder patterns (vendor-specific)
+                    val isKnownHardware = name.contains("omx.qcom") ||    // Qualcomm
+                            name.contains("omx.samsung") ||               // Samsung (older)
+                            name.contains("omx.exynos") ||                // Samsung Exynos (Galaxy A54)
+                            name.contains("c2.qti") ||                   // Qualcomm Codec2
+                            name.contains("c2.exynos") ||                // Samsung Exynos Codec2
+                            name.contains("c2.sec") ||                  // Samsung/SEC hardware decoder
+                            name.contains("c2.vendor") ||                // Generic vendor
+                            name.contains(".hw.") ||                     // some hardware decoders have "hw" in name
+                            name.endsWith(".hw")
+
+                    when {
+                        isKnownSoftware -> 2  // Software decoders last
+                        isKnownHardware -> 0  // Known hardware decoders first
+                        info.hardwareAccelerated -> 0  // Other hardware-accelerated decoders
+                        else -> 1  // Unknown decoders in the middle
+                    }
+                }
+
+                Timber.tag("MediaCodecSelector").d("Selected decoder for %s: %s (hardwareAccelerated=%s)",
+                    mimeType, sortedDecoders.firstOrNull()?.name, sortedDecoders.firstOrNull()?.hardwareAccelerated)
+                sortedDecoders
             }
         }
         val renderersFactory = object : DefaultRenderersFactory(context) {
@@ -509,7 +549,7 @@ class DualPlayerEngine @Inject constructor(
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .setUsage(C.USAGE_MEDIA)
             .build()
-            
+
         // Lightweight synchronous resolver: only performs cache lookups, NEVER blocks.
         // All heavy resolution (network I/O, proxy readiness) is done ahead of time
         // in resolveCloudUri() which is called from coroutines before ExoPlayer sees the URI.
@@ -524,7 +564,7 @@ class DualPlayerEngine @Inject constructor(
                         Timber.tag("DualPlayerEngine").d("resolveDataSpec: cache hit for $scheme URI")
                         return dataSpec.buildUpon().setUri(resolved).build()
                     }
-                    
+
                     Timber.tag("DualPlayerEngine").w("resolveDataSpec: cache MISS for %s — scheduling async pre-resolution", originalUri)
                     scope.launch(Dispatchers.IO) {
                         runCatching { resolveCloudUri(uri) }
@@ -536,7 +576,7 @@ class DualPlayerEngine @Inject constructor(
                 return dataSpec
             }
         }
-        
+
         val dataSourceFactory = DefaultDataSource.Factory(context)
         val resolvingFactory = ResolvingDataSource.Factory(dataSourceFactory, resolver)
         val extractorsFactory = DefaultExtractorsFactory()
@@ -801,7 +841,7 @@ class DualPlayerEngine @Inject constructor(
             playerB.clearMediaItems()
             playerB.playWhenReady = false
             playerB.setMediaItem(resolvedItem)
-            
+
             // Wake mode is configured in buildPlayer(), so we don't reapply it per item here.
             playerB.prepare()
             playerB.volume = 0f // Start silent
@@ -966,7 +1006,7 @@ class DualPlayerEngine @Inject constructor(
         // 4. Swap References
         playerA = incomingPlayer
         playerB = outgoingPlayer
-        
+
         // Critical: Reset pauseAtEndOfMediaItems on both players after swap.
         // The outgoing player (now B) had pauseAtEndOfMediaItems=true set before the transition started.
         // If we don't disable it, the outgoing player will pause itself when it reaches the end,
@@ -994,10 +1034,10 @@ class DualPlayerEngine @Inject constructor(
 
         // 6. Notify Service to update MediaSession
         onPlayerSwappedListeners.forEach { it(playerA) }
-        
+
         // Update Session ID for Equalizer
         _activeAudioSessionId.value = playerA.audioSessionId
-        
+
         Timber.tag("TransitionDebug").d("Players swapped EARLY. UI should now show next song.")
 
         // *** FADE LOOP ***
@@ -1148,3 +1188,4 @@ class DualPlayerEngine @Inject constructor(
         isReleased = true
     }
 }
+
