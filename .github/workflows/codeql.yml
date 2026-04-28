@@ -1,0 +1,50 @@
+name: "CodeQL Analysis (Kotlin/Gradle 9.3.1)"
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+  schedule:
+    - cron: '41 17 * * 3'
+
+jobs:
+  analyze:
+    name: Analyze Kotlin
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # Configured for Temurin Java 21
+    - name: Set up JDK 21 (Temurin)
+      uses: actions/setup-java@v4
+      with:
+        java-version: '21'
+        distribution: 'temurin'
+        cache: 'gradle'
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: 'java-kotlin'
+        build-mode: manual
+
+    - name: Build Android App
+      shell: bash
+      run: |
+        chmod +x gradlew
+        # Using --no-daemon is critical for CodeQL to trace the build accurately
+        ./gradlew assembleDebug --no-daemon
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:java-kotlin"
+
