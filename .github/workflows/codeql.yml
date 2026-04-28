@@ -8,15 +8,18 @@ on:
   schedule:
     - cron: '41 17 * * 3'
 
+permissions:
+  security-events: write
+  packages: read
+  actions: read
+  contents: read
+
 jobs:
   analyze:
     name: Analyze Kotlin
     runs-on: ubuntu-latest
-    permissions:
-      security-events: write
-      packages: read
-      actions: read
-      contents: read
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
     - name: Checkout repository
@@ -36,12 +39,12 @@ jobs:
         languages: 'java-kotlin'
         build-mode: manual
 
-    - name: Build Android App
+    - name: Build Android App (Release)
       shell: bash
       run: |
         chmod +x gradlew
         # Using --no-daemon is critical for CodeQL to trace the build accurately
-        ./gradlew assembleDebug -Porg.gradle.java.installations.auto-download=false --no-daemon
+        ./gradlew assembleRelease --no-daemon -Porg.gradle.java.installations.auto-download=false 2>&1
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4
