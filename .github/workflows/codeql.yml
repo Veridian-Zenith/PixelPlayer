@@ -1,4 +1,4 @@
-name: "CodeQL Analysis (Kotlin/Gradle 9.3.1)"
+name: "CodeQL Advanced"
 
 on:
   push:
