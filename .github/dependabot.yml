@@ -1,0 +1,11 @@
+version: 2
+updates:
+  - package-ecosystem: "gradle"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Optional: Groups updates to reduce PR noise
+    groups:
+      dependencies:
+        patterns:
+          - "*"
